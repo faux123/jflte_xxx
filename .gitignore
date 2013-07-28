@@ -91,7 +91,9 @@ mkattzip.sh
 mkeurzip.sh
 mksprzip.sh
 mkzip.sh
+mkgezip.sh
 out/
+out_ge/
 out_att/
 out_eur/
 out_spr/
