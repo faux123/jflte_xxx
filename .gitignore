@@ -91,10 +91,12 @@ mkgezip.sh
 mksprzip.sh
 mkvzwzip.sh
 mkzip.sh
+mkusczip.sh
 out/
 out_att/
 out_eur/
 out_ge/
 out_spr/
 out_vzw/
+out_usc/
 
