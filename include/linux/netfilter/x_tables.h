@@ -466,6 +466,7 @@ extern void xt_free_table_info(struct xt_table_info *info);
  */
 DECLARE_PER_CPU(seqcount_t, xt_recseq);
 
+
 /**
  * xt_write_recseq_begin - start of a write section
  *

@@ -15,8 +15,18 @@
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
+#include <linux/hrtimer.h>
 
 #include "power.h"
+#ifdef CONFIG_SEC_DVFS
+#include <linux/cpufreq.h>
+#endif
+
+#include <linux/mfd/pm8xxx/misc.h>
+#include <mach/sec_debug.h>
+#include <mach/restart.h>
+
+#define MAX_BUF 100
 
 DEFINE_MUTEX(pm_mutex);
 
@@ -25,6 +35,13 @@ DEFINE_MUTEX(pm_mutex);
 /* Routines for PM-transition notifications */
 
 static BLOCKING_NOTIFIER_HEAD(pm_chain_head);
+
+static void touch_event_fn(struct work_struct *work);
+static DECLARE_WORK(touch_event_struct, touch_event_fn);
+
+static struct hrtimer tc_ev_timer;
+static int tc_ev_processed;
+static ktime_t touch_evt_timer_val;
 
 int register_pm_notifier(struct notifier_block *nb)
 {
@@ -70,6 +87,81 @@ static ssize_t pm_async_store(struct kobject *kobj, struct kobj_attribute *attr,
 }
 
 power_attr(pm_async);
+
+static ssize_t
+touch_event_show(struct kobject *kobj,
+		 struct kobj_attribute *attr, char *buf)
+{
+	if (tc_ev_processed == 0)
+		return snprintf(buf, strnlen("touch_event", MAX_BUF) + 1,
+				"touch_event");
+	else
+		return snprintf(buf, strnlen("null", MAX_BUF) + 1,
+				"null");
+}
+
+static ssize_t
+touch_event_store(struct kobject *kobj,
+		  struct kobj_attribute *attr,
+		  const char *buf, size_t n)
+{
+
+	hrtimer_cancel(&tc_ev_timer);
+	tc_ev_processed = 0;
+
+	/* set a timer to notify the userspace to stop processing
+	 * touch event
+	 */
+	hrtimer_start(&tc_ev_timer, touch_evt_timer_val, HRTIMER_MODE_REL);
+
+	/* wakeup the userspace poll */
+	sysfs_notify(kobj, NULL, "touch_event");
+
+	return n;
+}
+
+power_attr(touch_event);
+
+static ssize_t
+touch_event_timer_show(struct kobject *kobj,
+		 struct kobj_attribute *attr, char *buf)
+{
+	return snprintf(buf, MAX_BUF, "%lld", touch_evt_timer_val.tv64);
+}
+
+static ssize_t
+touch_event_timer_store(struct kobject *kobj,
+			struct kobj_attribute *attr,
+			const char *buf, size_t n)
+{
+	unsigned long val;
+
+	if (strict_strtoul(buf, 10, &val))
+		return -EINVAL;
+
+	touch_evt_timer_val = ktime_set(0, val*1000);
+
+	return n;
+}
+
+power_attr(touch_event_timer);
+
+static void touch_event_fn(struct work_struct *work)
+{
+	/* wakeup the userspace poll */
+	tc_ev_processed = 1;
+	sysfs_notify(power_kobj, NULL, "touch_event");
+
+	return;
+}
+
+static enum hrtimer_restart tc_ev_stop(struct hrtimer *hrtimer)
+{
+
+	schedule_work(&touch_event_struct);
+
+	return HRTIMER_NORESTART;
+}
 
 #ifdef CONFIG_PM_DEBUG
 int pm_test_level = TEST_NONE;
@@ -273,7 +365,11 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 			   const char *buf, size_t n)
 {
 #ifdef CONFIG_SUSPEND
+#ifdef CONFIG_EARLYSUSPEND
+	suspend_state_t state = PM_SUSPEND_ON;
+#else
 	suspend_state_t state = PM_SUSPEND_STANDBY;
+#endif
 	const char * const *s;
 #endif
 	char *p;
@@ -292,8 +388,15 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 #ifdef CONFIG_SUSPEND
 	for (s = &pm_states[state]; state < PM_SUSPEND_MAX; s++, state++) {
 		if (*s && len == strlen(*s) && !strncmp(buf, *s, len)) {
+#ifdef CONFIG_EARLYSUSPEND
+			if (state == PM_SUSPEND_ON || valid_state(state)) {
+				error = 0;
+				request_suspend_state(state);
+				break;
+			}
+#else
 			error = pm_suspend(state);
-			break;
+#endif
 		}
 	}
 #endif
@@ -400,7 +503,252 @@ power_attr(pm_trace_dev_match);
 
 #endif /* CONFIG_PM_TRACE */
 
-static struct attribute * g[] = {
+#ifdef CONFIG_USER_WAKELOCK
+power_attr(wake_lock);
+power_attr(wake_unlock);
+#endif
+
+#ifdef CONFIG_SEC_DVFS
+DEFINE_MUTEX(dvfs_mutex);
+static unsigned long dvfs_id;
+static unsigned long apps_min_freq;
+static unsigned long apps_max_freq;
+static unsigned long thermald_max_freq;
+
+static unsigned long touch_min_freq;
+static unsigned long unicpu_max_freq = MAX_UNICPU_LIMIT;
+
+
+static int verify_cpufreq_target(unsigned int target)
+{
+	int i;
+	struct cpufreq_frequency_table *table;
+
+	table = cpufreq_frequency_get_table(BOOT_CPU);
+	if (table == NULL)
+		return -EFAULT;
+
+	for (i = 0; table[i].frequency != CPUFREQ_TABLE_END; i++) {
+		if (table[i].frequency < MIN_FREQ_LIMIT ||
+				table[i].frequency > MAX_FREQ_LIMIT)
+			continue;
+
+		if (target == table[i].frequency)
+			return 0;
+	}
+
+	return -EINVAL;
+}
+
+int set_freq_limit(unsigned long id, unsigned int freq)
+{
+	unsigned int min = MIN_FREQ_LIMIT;
+	unsigned int max = MAX_FREQ_LIMIT;
+
+	if (freq != 0 && freq != -1 && verify_cpufreq_target(freq))
+		return -EINVAL;
+
+	mutex_lock(&dvfs_mutex);
+
+	if (freq == -1)
+		dvfs_id &= ~id;
+	else
+		dvfs_id |= id;
+
+	/* update freq for apps/thermald */
+	if (id == DVFS_APPS_MIN_ID)
+		apps_min_freq = freq;
+	else if (id == DVFS_APPS_MAX_ID)
+		apps_max_freq = freq;
+	else if (id == DVFS_THERMALD_ID)
+		thermald_max_freq = freq;
+	else if (id == DVFS_TOUCH_ID)
+		touch_min_freq = freq;
+
+	/* set min - apps */
+	if (dvfs_id & DVFS_APPS_MIN_ID && min < apps_min_freq)
+		min = apps_min_freq;
+	if (dvfs_id & DVFS_TOUCH_ID && min < touch_min_freq)
+		min = touch_min_freq;
+
+	/* set max */
+	if (dvfs_id & DVFS_APPS_MAX_ID && max > apps_max_freq)
+		max = apps_max_freq;
+	if (dvfs_id & DVFS_THERMALD_ID && max > thermald_max_freq)
+		max = thermald_max_freq;
+	if (dvfs_id & DVFS_UNICPU_ID && max > unicpu_max_freq)
+		max = unicpu_max_freq;
+
+	/* check min max*/
+	if (min > max)
+		min = max;
+
+	/* update */
+	set_min_lock(min);
+	set_max_lock(max);
+
+	pr_info("%s: 0x%lu %d, min %d, max %d\n",
+				__func__, id, freq, min, max);
+
+	/* need to update now */
+	if (id & UPDATE_NOW_BITS) {
+		int cpu;
+		unsigned int cur = 0;
+
+		for_each_online_cpu(cpu) {
+			cur = cpufreq_quick_get(cpu);
+			if (cur) {
+				struct cpufreq_policy policy;
+				policy.cpu = cpu;
+
+				if (cur < min)
+					cpufreq_driver_target(&policy,
+						min, CPUFREQ_RELATION_H);
+				else if (cur > max)
+					cpufreq_driver_target(&policy,
+						max, CPUFREQ_RELATION_L);
+			}
+		}
+	}
+
+	mutex_unlock(&dvfs_mutex);
+
+	return 0;
+}
+
+static ssize_t cpufreq_min_limit_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	int freq;
+
+	freq = get_min_lock();
+	if (!freq)
+		freq = -1;
+
+	return sprintf(buf, "%d\n", freq);
+}
+
+static ssize_t cpufreq_min_limit_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buf, size_t n)
+{
+	int freq_min_limit, ret = 0;
+
+	ret = sscanf(buf, "%d", &freq_min_limit);
+
+	if (ret != 1)
+		return -EINVAL;
+
+	set_freq_limit(DVFS_APPS_MIN_ID, freq_min_limit);
+
+	return n;
+}
+
+static ssize_t cpufreq_max_limit_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	int freq;
+
+	freq = get_max_lock();
+	if (!freq)
+		freq = -1;
+
+	return sprintf(buf, "%d\n", freq);
+}
+
+static ssize_t cpufreq_max_limit_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buf, size_t n)
+{
+	int freq_max_limit, ret = 0;
+
+	ret = sscanf(buf, "%d", &freq_max_limit);
+
+	if (ret != 1)
+		return -EINVAL;
+
+	set_freq_limit(DVFS_APPS_MAX_ID, freq_max_limit);
+
+	return n;
+}
+static ssize_t cpufreq_table_show(struct kobject *kobj,
+			struct kobj_attribute *attr, char *buf)
+{
+	ssize_t len = 0;
+	int i, count = 0;
+	unsigned int freq;
+
+	struct cpufreq_frequency_table *table;
+
+	table = cpufreq_frequency_get_table(BOOT_CPU);
+	if (table == NULL)
+		return 0;
+
+	for (i = 0; table[i].frequency != CPUFREQ_TABLE_END; i++)
+		count = i;
+
+	for (i = count; i >= 0; i--) {
+		freq = table[i].frequency;
+
+		if (freq < MIN_FREQ_LIMIT || freq > MAX_FREQ_LIMIT)
+			continue;
+
+		len += sprintf(buf + len, "%u ", freq);
+	}
+
+	len--;
+	len += sprintf(buf + len, "\n");
+
+	return len;
+}
+
+static ssize_t cpufreq_table_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buf, size_t n)
+{
+	pr_info("%s: Not supported\n", __func__);
+	return n;
+}
+
+power_attr(cpufreq_max_limit);
+power_attr(cpufreq_min_limit);
+power_attr(cpufreq_table);
+#endif
+
+static ssize_t hard_reset_ctl_show(struct kobject *kobj,
+		struct kobj_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", pm8xxx_hard_reset_enabled());
+}
+
+static ssize_t hard_reset_ctl_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buf, size_t n)
+{
+	int ret = 0;
+	int enable;
+
+	ret = sscanf(buf, "%d", &enable);
+
+	if (ret != 1 || enable > 1)
+		return -EINVAL;
+
+	ret = pm8xxx_hard_reset_control(enable);
+	if (ret)
+		return -EPERM;
+
+	ret = resout_irq_control(enable);
+	if (ret)
+		return -EPERM;
+
+	pr_info("hard_reset_controlled = %d\n", enable);
+
+	return n;
+}
+
+power_attr(hard_reset_ctl);
+
+static struct attribute *g[] = {
 	&state_attr.attr,
 #ifdef CONFIG_PM_TRACE
 	&pm_trace_attr.attr,
@@ -409,10 +757,22 @@ static struct attribute * g[] = {
 #ifdef CONFIG_PM_SLEEP
 	&pm_async_attr.attr,
 	&wakeup_count_attr.attr,
+	&touch_event_attr.attr,
+	&touch_event_timer_attr.attr,
 #ifdef CONFIG_PM_DEBUG
 	&pm_test_attr.attr,
 #endif
+#ifdef CONFIG_USER_WAKELOCK
+	&wake_lock_attr.attr,
+	&wake_unlock_attr.attr,
 #endif
+#endif
+#ifdef CONFIG_SEC_DVFS
+	&cpufreq_min_limit_attr.attr,
+	&cpufreq_max_limit_attr.attr,
+	&cpufreq_table_attr.attr,
+#endif
+	&hard_reset_ctl_attr.attr,
 	NULL,
 };
 
@@ -441,9 +801,23 @@ static int __init pm_init(void)
 		return error;
 	hibernate_image_size_init();
 	hibernate_reserved_size_init();
+
+	touch_evt_timer_val = ktime_set(2, 0);
+	hrtimer_init(&tc_ev_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	tc_ev_timer.function = &tc_ev_stop;
+	tc_ev_processed = 1;
+
+
 	power_kobj = kobject_create_and_add("power", NULL);
 	if (!power_kobj)
 		return -ENOMEM;
+
+#ifdef CONFIG_SEC_DVFS
+	apps_min_freq = MIN_FREQ_LIMIT;
+	apps_max_freq = MAX_FREQ_LIMIT;
+	thermald_max_freq = MAX_FREQ_LIMIT;
+#endif
+
 	return sysfs_create_group(power_kobj, &attr_group);
 }
 
