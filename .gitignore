@@ -84,3 +84,17 @@ GTAGS
 *.orig
 *~
 \#*#
+
+mkattzip.sh
+mkeurzip.sh
+mkgezip.sh
+mksprzip.sh
+mkvzwzip.sh
+mkzip.sh
+out/
+out_att/
+out_eur/
+out_ge/
+out_spr/
+out_vzw/
+
