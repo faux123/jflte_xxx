@@ -107,6 +107,10 @@ bool early_boot_irqs_disabled __read_mostly;
 enum system_states system_state __read_mostly;
 EXPORT_SYMBOL(system_state);
 
+#ifdef CONFIG_SAMSUNG_LPM_MODE
+int poweroff_charging;
+#endif /*  CONFIG_SAMSUNG_LPM_MODE */
+
 /*
  * Boot command-line arguments
  */
@@ -224,6 +228,22 @@ static int __init loglevel(char *str)
 }
 
 early_param("loglevel", loglevel);
+
+/*batt_id_value */
+ int console_batt_stat;
+ static int __init battStatus(char *str)
+{
+	int batt_val;
+  
+	
+	if (get_option(&str, &batt_val)) {
+		console_batt_stat = batt_val;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+early_param("batt_id_value", battStatus);
 
 /* Change NUL term back to "=", to make "param" the whole string. */
 static int __init repair_env_string(char *param, char *val)
@@ -359,6 +379,7 @@ static __initdata DECLARE_COMPLETION(kthreadd_done);
 static noinline void __init_refok rest_init(void)
 {
 	int pid;
+	const struct sched_param param = { .sched_priority = 1 };
 
 	rcu_scheduler_starting();
 	/*
@@ -372,6 +393,7 @@ static noinline void __init_refok rest_init(void)
 	rcu_read_lock();
 	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
+	sched_setscheduler_nocheck(kthreadd_task, SCHED_FIFO, &param);
 	complete(&kthreadd_done);
 
 	/*
@@ -400,6 +422,13 @@ static int __init do_early_param(char *param, char *val)
 		}
 	}
 	/* We accept everything at this stage. */
+#ifdef CONFIG_SAMSUNG_LPM_MODE
+	/*  check power off charging */
+	if ((strncmp(param, "androidboot.bootchg", 19) == 0)) {
+		if (strncmp(val, "true", 4) == 0)
+			poweroff_charging = 1;
+	}
+#endif
 	return 0;
 }
 
