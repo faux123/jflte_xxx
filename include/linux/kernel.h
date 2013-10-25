@@ -349,6 +349,17 @@ extern int func_ptr_is_kernel_text(void *ptr);
 struct pid;
 extern struct pid *session_of_pgrp(struct pid *pgrp);
 
+#ifdef CONFIG_LGE_CRASH_HANDLER
+extern void set_crash_store_enable(void);
+extern void set_crash_store_disable(void);
+extern void store_crash_log(char *p);
+extern void set_kernel_crash_magic_number(void);
+#ifdef CONFIG_CPU_CP15_MMU
+extern void lge_save_ctx(struct pt_regs*, unsigned int, unsigned int,
+	unsigned int);
+#endif
+#endif
+
 unsigned long int_sqrt(unsigned long);
 
 extern void bust_spinlocks(int yes);
@@ -705,6 +716,12 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 
 extern int do_sysinfo(struct sysinfo *info);
 
+/* To identify board information in panic logs, set this */
+extern char *mach_panic_string;
+
 #endif /* __KERNEL__ */
+
+/* To identify board information in panic logs, set this */
+extern char *mach_panic_string;
 
 #endif
