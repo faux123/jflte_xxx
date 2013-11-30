@@ -113,7 +113,7 @@ config HAVE_IOREMAP_PROT
 	bool
 
 config HAVE_KPROBES
-	bool
+	def_bool n
 
 config HAVE_KRETPROBES
 	bool
@@ -140,6 +140,9 @@ config HAVE_ARCH_TRACEHOOK
 	bool
 
 config HAVE_DMA_ATTRS
+	bool
+
+config HAVE_DMA_CONTIGUOUS
 	bool
 
 config USE_GENERIC_SMP_HELPERS
