@@ -2832,6 +2832,12 @@ config MSM_CPU_PWRCTL
 	  stand alone power collapse operation. Selecting this option
 	  ensures that they are always off.
 
+config UPDATE_LCDC_LUT
+	bool "Set initial Qualcomm LCDC lut"
+	default n
+	help
+	  Set initial Qualcomm LCDC Look Up Table.
+
 config SEC_THERMISTOR
 	bool "Use external thermistor near AP for checking temprature"
 	default n
