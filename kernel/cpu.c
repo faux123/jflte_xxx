@@ -30,6 +30,11 @@ void cpu_maps_update_begin(void)
 	mutex_lock(&cpu_add_remove_lock);
 }
 
+int cpu_maps_is_updating(void)
+{
+	return mutex_is_locked(&cpu_add_remove_lock);
+}
+
 void cpu_maps_update_done(void)
 {
 	mutex_unlock(&cpu_add_remove_lock);
@@ -668,3 +673,23 @@ void init_cpu_online(const struct cpumask *src)
 {
 	cpumask_copy(to_cpumask(cpu_online_bits), src);
 }
+
+static ATOMIC_NOTIFIER_HEAD(idle_notifier);
+
+void idle_notifier_register(struct notifier_block *n)
+{
+	atomic_notifier_chain_register(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_register);
+
+void idle_notifier_unregister(struct notifier_block *n)
+{
+	atomic_notifier_chain_unregister(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_unregister);
+
+void idle_notifier_call_chain(unsigned long val)
+{
+	atomic_notifier_call_chain(&idle_notifier, val, NULL);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_call_chain);

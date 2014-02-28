@@ -3846,6 +3846,27 @@ static int nl80211_trigger_scan(struct sk_buff *skb, struct genl_info *info)
 		       nla_data(info->attrs[NL80211_ATTR_IE]),
 		       request->ie_len);
 	}
+	for (i = 0; i < IEEE80211_NUM_BANDS; i++)
+		if (wiphy->bands[i])
+			request->rates[i] =
+				(1 << wiphy->bands[i]->n_bitrates) - 1;
+	if (info->attrs[NL80211_ATTR_SCAN_SUPP_RATES]) {
+		nla_for_each_nested(attr,
+				    info->attrs[NL80211_ATTR_SCAN_SUPP_RATES],
+				    tmp) {
+			enum ieee80211_band band = nla_type(attr);
+			if (band < 0 || band >= IEEE80211_NUM_BANDS) {
+				err = -EINVAL;
+				goto out_free;
+			}
+			err = ieee80211_get_ratemask(wiphy->bands[band],
+						     nla_data(attr),
+						     nla_len(attr),
+						     &request->rates[band]);
+			if (err)
+				goto out_free;
+		}
+	}
 
 	for (i = 0; i < IEEE80211_NUM_BANDS; i++)
 		if (wiphy->bands[i])
@@ -3876,6 +3897,8 @@ static int nl80211_trigger_scan(struct sk_buff *skb, struct genl_info *info)
 
 	request->dev = dev;
 	request->wiphy = &rdev->wiphy;
+	request->no_cck =
+		nla_get_flag(info->attrs[NL80211_ATTR_TX_NO_CCK_RATE]);
 
 	rdev->scan_req = request;
 	err = rdev->ops->scan(&rdev->wiphy, dev, request);
@@ -4369,7 +4392,9 @@ static bool nl80211_valid_auth_type(enum nl80211_auth_type auth_type)
 static bool nl80211_valid_wpa_versions(u32 wpa_versions)
 {
 	return !(wpa_versions & ~(NL80211_WPA_VERSION_1 |
-				  NL80211_WPA_VERSION_2));
+				  NL80211_WPA_VERSION_2 |
+				  /*WAPI*/
+				  NL80211_WAPI_VERSION_1));
 }
 
 static int nl80211_authenticate(struct sk_buff *skb, struct genl_info *info)
@@ -4542,8 +4567,12 @@ static int nl80211_crypto_settings(struct cfg80211_registered_device *rdev,
 		if (len % sizeof(u32))
 			return -EINVAL;
 
-		if (settings->n_akm_suites > NL80211_MAX_NR_AKM_SUITES)
-			return -EINVAL;
+		if (settings->akm_suites[0] != WLAN_AKM_SUITE_CCKM) {
+			if (settings->n_akm_suites > NL80211_MAX_NR_AKM_SUITES)
+				return -EINVAL;
+		} else {
+			printk(KERN_INFO "nl80211_crypto_settings(CCKM)\n");
+		}
 
 		memcpy(settings->akm_suites, data, len);
 	}
@@ -8028,6 +8057,49 @@ void cfg80211_report_obss_beacon(struct wiphy *wiphy,
 }
 EXPORT_SYMBOL(cfg80211_report_obss_beacon);
 
+void cfg80211_tdls_oper_request(struct net_device *dev, const u8 *peer,
+				enum nl80211_tdls_operation oper,
+				u16 reason_code, gfp_t gfp)
+{
+	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	struct cfg80211_registered_device *rdev = wiphy_to_dev(wdev->wiphy);
+	struct sk_buff *msg;
+	void *hdr;
+	int err;
+
+	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, gfp);
+	if (!msg)
+		return;
+
+	hdr = nl80211hdr_put(msg, 0, 0, 0, NL80211_CMD_TDLS_OPER);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return;
+	}
+
+	if (nla_put_u32(msg, NL80211_ATTR_WIPHY, rdev->wiphy_idx) ||
+	    nla_put_u32(msg, NL80211_ATTR_IFINDEX, dev->ifindex) ||
+	    nla_put_u8(msg, NL80211_ATTR_TDLS_OPERATION, oper) ||
+	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, peer) ||
+	    (reason_code > 0 &&
+	     nla_put_u16(msg, NL80211_ATTR_REASON_CODE, reason_code)))
+		goto nla_put_failure;
+
+	err = genlmsg_end(msg, hdr);
+	if (err < 0) {
+		nlmsg_free(msg);
+		return;
+	}
+
+	genlmsg_multicast_netns(wiphy_net(&rdev->wiphy), msg, 0,
+				nl80211_mlme_mcgrp.id, gfp);
+	return;
+
+ nla_put_failure:
+	genlmsg_cancel(msg, hdr);
+	nlmsg_free(msg);
+}
+EXPORT_SYMBOL(cfg80211_tdls_oper_request);
 static int nl80211_netlink_notify(struct notifier_block * nb,
 				  unsigned long state,
 				  void *_notify)
@@ -8056,6 +8128,57 @@ static int nl80211_netlink_notify(struct notifier_block * nb,
 static struct notifier_block nl80211_netlink_notifier = {
 	.notifier_call = nl80211_netlink_notify,
 };
+void cfg80211_ft_event(struct net_device *netdev,
+		       struct cfg80211_ft_event_params *ft_event)
+{
+	struct wiphy *wiphy = netdev->ieee80211_ptr->wiphy;
+	struct cfg80211_registered_device *rdev = wiphy_to_dev(wiphy);
+	struct sk_buff *msg;
+	void *hdr;
+	int err;
+
+	if (!ft_event->target_ap)
+		return;
+
+	msg = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	if (!msg)
+		return;
+
+	hdr = nl80211hdr_put(msg, 0, 0, 0, NL80211_CMD_FT_EVENT);
+	if (!hdr) {
+		nlmsg_free(msg);
+		return;
+	}
+
+	nla_put_u32(msg, NL80211_ATTR_WIPHY, rdev->wiphy_idx);
+	nla_put_u32(msg, NL80211_ATTR_IFINDEX, netdev->ifindex);
+	nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, ft_event->target_ap);
+	if (ft_event->ies)
+		nla_put(msg, NL80211_ATTR_IE, ft_event->ies_len, ft_event->ies);
+	if (ft_event->ric_ies)
+		nla_put(msg, NL80211_ATTR_IE_RIC, ft_event->ric_ies_len,
+			ft_event->ric_ies);
+
+	err = genlmsg_end(msg, hdr);
+	if (err < 0) {
+		nlmsg_free(msg);
+		return;
+	}
+
+	genlmsg_multicast_netns(wiphy_net(&rdev->wiphy), msg, 0,
+				nl80211_mlme_mcgrp.id, GFP_KERNEL);
+}
+EXPORT_SYMBOL(cfg80211_ft_event);
+
+void cfg80211_ap_stopped(struct net_device *netdev, gfp_t gfp)
+{
+    struct wireless_dev *wdev = netdev->ieee80211_ptr;
+    struct cfg80211_registered_device *rdev = wiphy_to_dev(wdev->wiphy);
+
+    nl80211_send_mlme_event(rdev, netdev, NULL, 0,
+                NL80211_CMD_STOP_AP, gfp);
+}
+EXPORT_SYMBOL(cfg80211_ap_stopped);
 
 /* initialisation/exit functions */
 

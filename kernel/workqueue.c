@@ -43,6 +43,9 @@
 #include <linux/idr.h>
 
 #include "workqueue_sched.h"
+#if defined(CONFIG_SEC_DEBUG)
+#include <mach/sec_debug.h>
+#endif
 
 enum {
 	/* global_cwq flags */
@@ -1210,8 +1213,13 @@ static void worker_enter_idle(struct worker *worker)
 	} else
 		wake_up_all(&gcwq->trustee_wait);
 
-	/* sanity check nr_running */
-	WARN_ON_ONCE(gcwq->nr_workers == gcwq->nr_idle &&
+	/*
+	 * Sanity check nr_running.  Because trustee releases gcwq->lock
+	 * between setting %WORKER_ROGUE and zapping nr_running, the
+	 * warning may trigger spuriously.  Check iff trustee is idle.
+	 */
+	WARN_ON_ONCE(gcwq->trustee_state == TRUSTEE_DONE &&
+		     gcwq->nr_workers == gcwq->nr_idle &&
 		     atomic_read(get_gcwq_nr_running(gcwq->cpu)));
 }
 
@@ -1863,6 +1871,9 @@ __acquires(&gcwq->lock)
 	lock_map_acquire_read(&cwq->wq->lockdep_map);
 	lock_map_acquire(&lockdep_map);
 	trace_workqueue_execute_start(work);
+#if defined(CONFIG_SEC_DEBUG)
+	secdbg_sched_msg("@%pS", f);
+#endif
 	f(work);
 	/*
 	 * While we must be careful to not use "work" after this, the trace
