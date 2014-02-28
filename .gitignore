@@ -84,3 +84,18 @@ GTAGS
 *.orig
 *~
 \#*#
+
+#user ignores:
+
+getmo.sh
+gevzw.sh
+mkattzip.sh
+mkeurzip.sh
+mksprzip.sh
+mkusczip.sh
+mkvzwzip.sh
+mkzip.sh
+out/
+out_ge/
+ramfs/
+
