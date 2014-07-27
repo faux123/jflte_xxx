@@ -174,30 +174,12 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
 	int selected_tasksize = 0;
 	int selected_oom_score_adj;
 #endif
-
-	if (nr_to_scan > 0) {
-		if (mutex_lock_interruptible(&scan_mutex) < 0)
-			return 0;
-	}
-
-#if defined (CONFIG_SWAP) && (defined (CONFIG_ZSWAP) || defined (CONFIG_ZRAM))
-	si_swapinfo(&si);
-	other_free = global_page_state(NR_FREE_PAGES);
-	other_file = global_page_state(NR_FILE_PAGES) -
-						global_page_state(NR_SHMEM) +
-						(si.freeswap >> 1) -
-						total_swapcache_pages;
-#else
-	other_free = global_page_state(NR_FREE_PAGES);
-	other_file = global_page_state(NR_FILE_PAGES) -
-						global_page_state(NR_SHMEM);
+	int array_size = ARRAY_SIZE(lowmem_adj);
+	int other_free = global_page_state(NR_FREE_PAGES);
+	int other_file = global_page_state(NR_FILE_PAGES) - global_page_state(NR_SHMEM);
+#ifdef CONFIG_ZRAM_FOR_ANDROID
+	other_file -= total_swapcache_pages;
 #endif
-
-	tune_lmk_param(&other_free, &other_file, sc);
-
-	//pr_info("LMK: tuned other_free: %d\n", other_free);
-	//pr_info("LMK: tuned other_file: %d\n", other_file);
-
 	if (lowmem_adj_size < array_size)
 		array_size = lowmem_adj_size;
 	if (lowmem_minfree_size < array_size)
