@@ -2869,6 +2869,12 @@ config SEC_THERMISTOR
 	help
 	Use thermistor driver for checking temperature near AP chip.
 
+config GED_BUILD
+	bool "Use Google Experience Device"
+	default n
+	help
+	Use Google Experience Device.
+
 config SEC_FACTORY
 	bool "Enable FACTORY Features"
 	default n

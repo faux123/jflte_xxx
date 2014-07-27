@@ -1921,6 +1921,11 @@ void msm_hs_request_clock_off(struct uart_port *uport) {
 	unsigned long flags;
 	struct msm_hs_port *msm_uport = UARTDM_TO_MSM(uport);
 
+	if(msm_uport->is_shutdown) {
+		printk(KERN_INFO "(msm_serial_hs) msm_hs_request_clock_off - uart shutdown, so return..\n");
+		return;
+	}
+
 	spin_lock_irqsave(&uport->lock, flags);
 	if (msm_uport->clk_state == MSM_HS_CLK_ON) {
 		msm_uport->clk_state = MSM_HS_CLK_REQUEST_OFF;
@@ -1943,6 +1948,11 @@ void msm_hs_request_clock_on(struct uart_port *uport)
 	unsigned long flags;
 	unsigned int data;
 	int ret = 0;
+
+	if(msm_uport->is_shutdown) {
+		printk(KERN_INFO "(msm_serial_hs) msm_hs_request_clock_on - uart shutdown, so return..\n");
+		return;
+	}
 
 	mutex_lock(&msm_uport->clk_mutex);
 	spin_lock_irqsave(&uport->lock, flags);
@@ -2447,6 +2457,7 @@ static int __devinit msm_hs_probe(struct platform_device *pdev)
 	uport->flags = UPF_BOOT_AUTOCONF;
 	uport->uartclk = 7372800;
 	msm_uport->imr_reg = 0x0;
+	msm_uport->is_shutdown = true;
 
 	msm_uport->clk = clk_get(&pdev->dev, "core_clk");
 	if (IS_ERR(msm_uport->clk))
